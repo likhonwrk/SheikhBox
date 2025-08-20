@@ -1,137 +1,96 @@
-import os
-import asyncio
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from contextlib import asynccontextmanager
-import google.generativeai as genai
-from google.generativeai import types
-from mcp import ClientSession
-from mcp.client.tcp import tcp_client
-from typing import List, Dict
-import datetime
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from sse_starlette.sse import EventSourceResponse
+import websockets
+from app.application.services.session_service import SessionService
+from app.application.services.chat_service import ChatService
+import json
 
-# --- Configuration ---
-api_key = os.environ.get("GOOGLE_API_KEY")
-if not api_key:
-    raise RuntimeError("GOOGLE_API_KEY environment variable not set.")
-genai.configure(api_key=api_key)
+app = FastAPI(
+    title="SheikhBox: Intelligent Conversation Agent API",
+    description="A DDD-based AI agent system with sandboxed tool execution.",
+    version="1.0.0"
+)
 
-MCP_TOOLS = {
-    "puppeteer": 8001, "sequentialthinking": 8002, "memory": 8003,
-    "docker": 8004, "sandbox": 8005, "time": 8006, "fetch": 8007,
-    "duckduckgo": 8008, "desktop": 8009,
-}
-tool_sessions: Dict[str, ClientSession] = {}
+session_service = SessionService()
+chat_service = ChatService(session_service)
 
-# --- Lifespan Management ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("Connecting to MCP tool servers...")
-    for name, port in MCP_TOOLS.items():
-        try:
-            reader, writer = await asyncio.open_connection(name, port)
-            session = ClientSession(reader, writer)
-            await session.initialize()
-            tool_sessions[name] = session
-            print(f"Connected to MCP tool: {name}")
-        except Exception as e:
-            print(f"Failed to connect to MCP tool: {name}. Error: {e}")
-    yield
-    print("Closing MCP connections...")
-    for session in tool_sessions.values():
-        await session.close()
+# --- Pydantic Models for API ---
+from pydantic import BaseModel
 
-# --- Pydantic Models ---
-class AgentRequest(BaseModel):
-    prompt: str = Field(..., example="What is the capital of France?")
+class ChatRequest(BaseModel):
+    message: str
 
-class AgentResponse(BaseModel):
-    response: str = Field(..., example="The capital of France is Paris.")
+class SessionResponse(BaseModel):
+    session_id: str
 
-class BatchRequest(BaseModel):
-    prompts: List[str] = Field(..., min_items=1, max_items=100, example=["What is 2+2?", "Summarize 'Dune'"])
+# --- API Endpoints ---
 
-class BatchSubmissionResponse(BaseModel):
-    job_name: str = Field(..., example="batches/123456789")
-    status: str = Field(..., example="JOB_STATE_PENDING")
+@app.put("/api/v1/sessions", response_model=SessionResponse, status_code=201)
+async def create_session():
+    session_id = await session_service.create_session()
+    return {"session_id": session_id}
 
-class BatchStatusResponse(BaseModel):
-    job_name: str
-    status: str
-    results: List[Dict] | None = None
+@app.delete("/api/v1/sessions/{session_id}", status_code=204)
+async def delete_session(session_id: str):
+    await session_service.delete_session(session_id)
+    return {}
 
-class CacheRequest(BaseModel):
-    content: str = Field(..., description="Large text content to cache.")
-    ttl_minutes: int = Field(60, description="Time-to-live for the cache in minutes.")
-
-class CacheResponse(BaseModel):
-    cache_name: str = Field(..., example="cachedContents/abc-123")
-
-# --- FastAPI App ---
-app = FastAPI(lifespan=lifespan, title="SheikhBox Multi-Tool AI Agent", version="3.0.0")
-
-# --- Endpoints ---
-@app.post("/agent", response_model=AgentResponse, summary="Interact with the agent in real-time")
-async def agent_endpoint(request: AgentRequest):
-    # ... (implementation from previous step)
-    if not tool_sessions:
-        raise HTTPException(status_code=503, detail="Agent is offline, no tools connected.")
-    try:
-        tools = list(tool_sessions.values())
-        model_response = await genai.GenerativeModel('gemini-2.5-pro').generate_content_async(contents=request.prompt, tools=tools)
-        return AgentResponse(response=model_response.text)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/agent/batch", response_model=BatchSubmissionResponse, summary="Submit prompts for asynchronous processing")
-async def agent_batch_endpoint(request: BatchRequest):
-    # ... (implementation from previous step)
-    try:
-        inline_requests = [{'contents': [{'parts': [{'text': prompt}]}]} for prompt in request.prompts]
-        batch_job = genai.GenerativeModel('gemini-2.5-flash').batch_generate_content(requests=inline_requests)
-        return BatchSubmissionResponse(job_name=batch_job.name, status=batch_job.state.name)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create batch job: {str(e)}")
-
-@app.get("/agent/batch/{job_name}", response_model=BatchStatusResponse, summary="Check status and retrieve results of a batch job")
-async def get_batch_status(job_name: str):
-    # ... (implementation from previous step)
-    try:
-        if not job_name.startswith("batches/"):
-            job_name = f"batches/{job_name}"
-        batch_job = genai.get_batch_generate_content_job(name=job_name)
-        results = None
-        if batch_job.state.name == 'JOB_STATE_SUCCEEDED':
-            results = [{"response": r.text if r else "No response"} for r in batch_job.responses]
-        return BatchStatusResponse(job_name=batch_job.name, status=batch_job.state.name, results=results)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Job not found or error: {str(e)}")
-
-@app.post("/agent/cache", response_model=CacheResponse, summary="Create a context cache for repeated use")
-async def create_cache(request: CacheRequest):
-    try:
-        ttl = datetime.timedelta(minutes=request.ttl_minutes)
-        cache = genai.CachedContent.create(
-            model="models/gemini-2.5-pro-001",
-            contents=[request.content],
-            ttl=ttl,
-        )
-        return CacheResponse(cache_name=cache.name)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create cache: {str(e)}")
-
-@app.post("/agent/cached/{cache_name}", response_model=AgentResponse, summary="Interact with the agent using a context cache")
-async def cached_agent_endpoint(cache_name: str, request: AgentRequest):
-    if not cache_name.startswith("cachedContents/"):
-        cache_name = f"cachedContents/{cache_name}"
+@app.post("/api/v1/sessions/{session_id}/chat")
+async def chat_with_session(session_id: str, request: ChatRequest):
+    async def event_stream():
+        async for event in chat_service.chat(session_id, request.message):
+            yield f"event: {event['event']}\ndata: {json.dumps(event['data'])}\n\n"
     
-    if not tool_sessions:
-        raise HTTPException(status_code=503, detail="Agent is offline, no tools connected.")
-        
+    return EventSourceResponse(event_stream())
+
+@app.websocket("/api/v1/sessions/{session_id}/vnc")
+async def vnc_proxy(session_id: str, websocket: WebSocket):
+    await websocket.accept(subprotocol="binary")
     try:
-        tools = list(tool_sessions.values())
-        model = genai.GenerativeModel.from_cached_content(cached_content=genai.CachedContent(name=cache_name))
-        model_response = await model.generate_content_async(contents=request.prompt, tools=tools)
-        return AgentResponse(response=model_response.text)
+        sandbox = await session_service.get_session_sandbox(session_id)
+        # The sandbox's _vnc_url is a ws:// URL
+        vnc_url = sandbox._vnc_url 
+        
+        async with websockets.connect(vnc_url, subprotocols=["binary"]) as remote_ws:
+            # Forward messages in both directions
+            consumer_task = asyncio.create_task(
+                _forward_messages(websocket, remote_ws, "client_to_server")
+            )
+            producer_task = asyncio.create_task(
+                _forward_messages(remote_ws, websocket, "server_to_client")
+            )
+            done, pending = await asyncio.wait(
+                [consumer_task, producer_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+    except WebSocketDisconnect:
+        print(f"Client disconnected from VNC for session {session_id}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error with cached session: {str(e)}")
+        print(f"An error occurred in VNC proxy for session {session_id}: {e}")
+    finally:
+        if not websocket.client_state == "DISCONNECTED":
+            await websocket.close()
+
+async def _forward_messages(source: WebSocket, dest: WebSocket, direction: str):
+    while True:
+        try:
+            message = await source.receive_bytes()
+            await dest.send_bytes(message)
+        except (WebSocketDisconnect, websockets.exceptions.ConnectionClosed):
+            print(f"Connection closed in direction: {direction}")
+            break
+        except Exception as e:
+            print(f"Error forwarding message in {direction}: {e}")
+            break
+
+# --- Exception Handling ---
+@app.exception_handler(ValueError)
+async def value_error_exception_handler(request: Request, exc: ValueError):
+    return JSONResponse(
+        status_code=404,
+        content={"code": 404, "msg": str(exc), "data": None},
+    )
