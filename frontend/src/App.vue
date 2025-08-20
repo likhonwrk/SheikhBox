@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import Conversation from '@/components/ai-elements/conversation'
-import Message from '@/components/ai-elements/message'
-import PromptInput from '@/components/ai-elements/prompt-input'
+import { ref } from 'vue';
+import Conversation from '../../../components/ai-elements/conversation';
+import Message from '../../../components/ai-elements/message';
+import PromptInput from '../../../components/ai-elements/prompt-input';
 
 const messages = ref([
   {
