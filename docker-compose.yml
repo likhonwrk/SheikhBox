@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  api:
+    build: ./app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - GOOGLE_API_KEY=AIzaSyDdU94Z0r7FwhfqmD3yDDkne-CLpqBiDb8
+    networks:
+      - agent-network
+
+  puppeteer:
+    image: mcp/puppeteer
+    networks:
+      - agent-network
+
+  sequentialthinking:
+    image: mcp/sequentialthinking
+    networks:
+      - agent-network
+
+  memory:
+    image: mcp/memory
+    networks:
+      - agent-network
+
+  docker-tool:
+    image: mcp/docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - agent-network
+
+  sandbox:
+    image: mcp/node-code-sandbox
+    networks:
+      - agent-network
+
+  time:
+    image: mcp/time
+    networks:
+      - agent-network
+
+  fetch:
+    image: mcp/fetch
+    networks:
+      - agent-network
+
+  duckduckgo:
+    image: mcp/duckduckgo
+    networks:
+      - agent-network
+  
+  desktop-commander:
+    image: mcp/desktop-commander
+    networks:
+      - agent-network
+
+networks:
+  agent-network:
+    driver: bridge
