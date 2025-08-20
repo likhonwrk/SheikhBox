@@ -60,6 +60,13 @@ services:
     networks:
       - agent-network
 
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    networks:
+      - agent-network
+
 networks:
   agent-network:
     driver: bridge
